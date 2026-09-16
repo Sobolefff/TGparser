@@ -63,7 +63,9 @@ class BaseParser(ABC):
     def http(self) -> httpx.AsyncClient:
         """Plain HTTP client for JSON APIs that do not fingerprint clients."""
         if self._http is None:
-            self._http = create_http_client(self._settings.request_timeout)
+            self._http = create_http_client(
+                self._settings.request_timeout, self._settings.parser_proxy
+            )
         return self._http
 
     @property
@@ -73,6 +75,7 @@ class BaseParser(ABC):
             self._browser = BrowserSession(
                 impersonate=self._settings.impersonate,
                 timeout=self._settings.request_timeout,
+                proxy=self._settings.parser_proxy,
             )
         return self._browser
 

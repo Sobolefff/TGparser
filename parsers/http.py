@@ -1,16 +1,19 @@
 """HTTP plumbing shared by parsers.
 
-Two transports are used side by side:
+Every marketplace request goes through :class:`curl_cffi.requests.AsyncSession` with a real
+Chrome impersonation profile: Wildberries, Ozon and Yandex Market all run WAFs that score
+the TLS/JA3 fingerprint, and a plain client is rejected with ``403`` before the headers are
+even read. :class:`httpx.AsyncClient` is kept for traffic that is not fingerprinted — image
+CDNs and HEAD probes.
 
-* :class:`httpx.AsyncClient` — plain JSON APIs that do not fingerprint the client
-  (Wildberries card API, image CDNs).
-* :class:`curl_cffi.requests.AsyncSession` — pages behind Cloudflare/anti-bot, where the
-  TLS/JA3 fingerprint of a real browser is required (Ozon, Yandex Market).
+Both transports honour ``PARSER_PROXY``, which is separate from ``TELEGRAM_PROXY``: the bot
+may need one exit point for Telegram and a different one for the marketplaces.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
 from types import TracebackType
 from typing import Any, Final, Self
 
@@ -23,6 +26,13 @@ try:  # curl_cffi >= 0.7 moved its exception module around a couple of times.
     from curl_cffi.requests.exceptions import RequestException as CurlError
 except ImportError:  # pragma: no cover - depends on the installed curl_cffi build
     from curl_cffi.requests.errors import RequestsError as CurlError
+
+logger = logging.getLogger(__name__)
+
+USER_AGENT: Final = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
 BROWSER_HEADERS: Final[dict[str, str]] = {
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,"
@@ -50,12 +60,19 @@ _CAPTCHA_MARKERS: Final[tuple[str, ...]] = (
 )
 
 
+def _blocked(url: str, status: int, *, hint: str = "") -> MarketplaceBlockedError:
+    """Build a blocked-access error and log enough context to act on it."""
+    logger.warning("blocked by marketplace: HTTP %s at %s %s", status, url, hint)
+    return MarketplaceBlockedError(f"HTTP {status} at {url} {hint}".strip())
+
+
 class BrowserSession:
     """Thin async wrapper around ``curl_cffi`` with a single lazily created session."""
 
-    def __init__(self, *, impersonate: str, timeout: float) -> None:
+    def __init__(self, *, impersonate: str, timeout: float, proxy: str | None = None) -> None:
         self._impersonate = impersonate
         self._timeout = timeout
+        self._proxy = proxy
         self._session: AsyncSession[Response] | None = None
         self._lock = asyncio.Lock()
 
@@ -67,6 +84,7 @@ class BrowserSession:
                         impersonate=self._impersonate,
                         timeout=self._timeout,
                         headers=BROWSER_HEADERS,
+                        proxy=self._proxy,
                         verify=True,
                     )
         return self._session
@@ -97,8 +115,10 @@ class BrowserSession:
 
         text = response.text or ""
         final_url = str(response.url)
-        if response.status_code in _BLOCKED_STATUSES or _looks_like_captcha(final_url, text):
-            raise MarketplaceBlockedError(f"blocked at {final_url} (HTTP {response.status_code})")
+        if response.status_code in _BLOCKED_STATUSES:
+            raise _blocked(final_url, response.status_code, hint=f"({_server_of(response)})")
+        if _looks_like_captcha(final_url, text):
+            raise _blocked(final_url, response.status_code, hint="(captcha challenge)")
         return response.status_code, final_url, text
 
     async def resolve(self, url: str) -> str:
@@ -123,23 +143,26 @@ class BrowserSession:
         await self.aclose()
 
 
+def _server_of(response: Response) -> str:
+    server = response.headers.get("server") or "unknown server"
+    return f"server={server}"
+
+
 def _looks_like_captcha(url: str, body: str) -> bool:
     haystack = f"{url}\n{body[:2048]}".lower()
     return any(marker in haystack for marker in _CAPTCHA_MARKERS)
 
 
-def create_http_client(timeout: float) -> httpx.AsyncClient:
-    """Build the shared plain-HTTP client (JSON APIs, image downloads)."""
+def create_http_client(timeout: float, proxy: str | None = None) -> httpx.AsyncClient:
+    """Build the plain-HTTP client used for image downloads and HEAD probes."""
     return httpx.AsyncClient(
         timeout=httpx.Timeout(timeout),
         follow_redirects=True,
+        proxy=proxy,
         headers={
             "accept": "application/json, text/plain, */*",
             "accept-language": BROWSER_HEADERS["accept-language"],
-            "user-agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-            ),
+            "user-agent": USER_AGENT,
         },
         limits=httpx.Limits(max_connections=32, max_keepalive_connections=16),
     )
@@ -155,7 +178,7 @@ async def get_json(client: httpx.AsyncClient, url: str, **kwargs: Any) -> Any:
         raise ParserResponseError(f"transport error for {url}: {exc}") from exc
 
     if response.status_code in _BLOCKED_STATUSES:
-        raise MarketplaceBlockedError(f"blocked at {url} (HTTP {response.status_code})")
+        raise _blocked(url, response.status_code)
     if response.status_code >= 500:
         raise ParserResponseError(f"{url} answered HTTP {response.status_code}")
 

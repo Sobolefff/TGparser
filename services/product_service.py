@@ -46,7 +46,9 @@ class ProductService:
         self._dispatcher = dispatcher
         self._cache = cache
         self._settings = settings
-        self._http = http_client or create_http_client(settings.request_timeout)
+        self._http = http_client or create_http_client(
+            settings.request_timeout, settings.parser_proxy
+        )
         self._owns_http = http_client is None
         self._images = ImageFetcher(self._http, max_bytes=settings.max_image_bytes)
 

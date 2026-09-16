@@ -1,8 +1,15 @@
 """Yandex Market strategy.
 
 Yandex Market has no open product API and guards the SPA with SmartCaptcha, so the page is
-fetched with a TLS-impersonating client and read through the JSON-LD block that Market
-renders server-side for search engines. Open Graph meta tags act as a second source.
+fetched with a TLS-impersonating client and read through the JSON-LD block Market renders
+server-side for search engines. Open Graph meta tags act as a second source.
+
+Caveat: Market has been observed serving a pure client-side shell — HTTP 200, ~1.4 MB of
+JavaScript, no JSON-LD and no Open Graph tags beyond ``og:site_name``, not even for a
+Googlebot user agent. There is nothing left in the HTML to parse in that case, so the
+strategy reports it honestly instead of pretending the item is out of stock. Restoring
+support means driving the internal resolver API (cookies plus anti-bot tokens) or a
+headless browser.
 """
 
 from __future__ import annotations
@@ -58,11 +65,16 @@ class YandexMarketParser(BaseParser):
         offer = self._pick_offer(entity)
         meta = self._meta_tags(tree)
 
-        title = first_str(entity.get("name"), meta.get("og:title"), self._document_title(tree))
+        title = first_str(entity.get("name"), meta.get("og:title"))
         if title is None:
-            raise ProductNotFoundError(
-                f"no structured product data on {final_url}",
-                user_message="Не удалось прочитать карточку Яндекс Маркета — попробуйте позже.",
+            # A 200 with no structured data means Market served the client-side shell:
+            # the card is assembled in the browser and nothing is left in the HTML to read.
+            raise ParserResponseError(
+                f"no structured product data on {final_url} (client-side shell, {len(html)} bytes)",
+                user_message=(
+                    "Яндекс Маркет сейчас отдаёт карточку только через JavaScript — "
+                    "прочитать её не получается. Пришлите ссылку с Wildberries или Ozon."
+                ),
             )
 
         price, original_price = self._extract_prices(offer)
@@ -94,11 +106,6 @@ class YandexMarketParser(BaseParser):
             if key and content:
                 tags.setdefault(key, content)
         return tags
-
-    @staticmethod
-    def _document_title(tree: LexborHTMLParser) -> str | None:
-        node = tree.css_first("title")
-        return node.text(strip=True) if node is not None else None
 
     @staticmethod
     def _pick_offer(entity: dict[str, Any]) -> dict[str, Any]:

@@ -1,22 +1,24 @@
 """Wildberries strategy.
 
 Wildberries exposes an unauthenticated card API (``card.wb.ru``) that returns the whole
-product payload as JSON, so no HTML parsing is needed. Images live on sharded ``basket-NN``
-CDN hosts whose number is derived arithmetically from the article id.
+product payload as JSON, so no HTML parsing is needed — but it is fronted by a WAF that
+rejects clients whose TLS fingerprint is not a browser, hence curl_cffi. Images live on
+sharded ``basket-NN`` CDN hosts whose number is derived arithmetically from the article id.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from decimal import Decimal
 from typing import Any, ClassVar, Final
+from urllib.parse import urlencode
 
 import httpx
 
 from parsers.base import BaseParser
 from parsers.exceptions import ParserResponseError, ProductNotFoundError
-from parsers.http import get_json
 from parsers.utils import first_str, parse_decimal, parse_int, parse_rating
 from schemas.product import Marketplace, ProductInfo
 
@@ -28,6 +30,14 @@ _CARD_PARAMS: Final[dict[str, str]] = {
     "dest": "-1257786",  # Moscow; determines which warehouse prices are returned
     "spp": "30",
     "ab_testing": "false",
+}
+_API_HEADERS: Final[dict[str, str]] = {
+    "accept": "*/*",
+    "origin": "https://www.wildberries.ru",
+    "referer": "https://www.wildberries.ru/",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "cross-site",
 }
 # Upper bound of `vol` for each basket host, in order. Index + 1 == basket number.
 _BASKET_BOUNDS: Final[tuple[int, ...]] = (
@@ -117,7 +127,25 @@ class WildberriesParser(BaseParser):
         return match.group(1)
 
     async def _fetch_card(self, article: str) -> dict[str, Any]:
-        payload = await get_json(self.http, _CARD_API, params={**_CARD_PARAMS, "nm": article})
+        """Fetch the card through the impersonating client.
+
+        ``card.wb.ru`` sits behind a WAF that scores the TLS fingerprint: a plain HTTP client
+        is answered with ``403`` regardless of headers, so this goes over curl_cffi like the
+        other marketplaces.
+        """
+        query = urlencode({**_CARD_PARAMS, "nm": article})
+        status, final_url, body = await self.browser.get(
+            f"{_CARD_API}?{query}", headers=_API_HEADERS
+        )
+        if status == 404:
+            raise ProductNotFoundError(f"card API answered 404 for article {article}")
+        if status >= 400:
+            raise ParserResponseError(f"card API answered HTTP {status} for {final_url}")
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise ParserResponseError("card API returned a non-JSON body") from exc
         if not isinstance(payload, dict):
             raise ParserResponseError("card API returned a non-object payload")
 

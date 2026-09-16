@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import Final, Literal
+from urllib.parse import urlsplit
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+
+#: Proxy schemes understood by aiohttp_socks. Note: "socks5h" and "https" are NOT among them.
+_PROXY_SCHEMES: Final[frozenset[str]] = frozenset({"socks4", "socks5", "http"})
 
 
 class Settings(BaseSettings):
@@ -35,6 +39,37 @@ class Settings(BaseSettings):
         ),
     )
 
+    @field_validator("telegram_proxy", "parser_proxy", mode="before")
+    @classmethod
+    def _validate_proxy(cls, value: object, info: ValidationInfo) -> str | None:
+        """Reject proxy URLs the underlying clients cannot parse.
+
+        Checked here rather than at connection time: an unusable value otherwise blows up
+        deep inside the HTTP client with an opaque ``Invalid scheme component`` and takes
+        the whole process down before polling even starts.
+        """
+        if not isinstance(value, str) or not value.strip():
+            return None
+
+        name = (info.field_name or "proxy").upper()
+        url = value.strip()
+        parts = urlsplit(url)
+        if parts.scheme not in _PROXY_SCHEMES:
+            raise ValueError(
+                f"{name} has an unsupported scheme {parts.scheme!r}. "
+                f"Use one of: {', '.join(f'{s}://host:port' for s in sorted(_PROXY_SCHEMES))}"
+            )
+        try:
+            port = parts.port
+        except ValueError as exc:  # non-numeric or out-of-range port
+            raise ValueError(f"{name} has an invalid port: {exc}") from exc
+        if port is None:
+            raise ValueError(
+                f"{name} must include an explicit port, e.g. "
+                f"{parts.scheme}://{parts.hostname or 'host'}:1080"
+            )
+        return url
+
     # Redis
     redis_url: str = "redis://localhost:6379/0"
 
@@ -49,6 +84,13 @@ class Settings(BaseSettings):
         description="curl_cffi browser profile used for TLS fingerprint impersonation",
     )
     max_image_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    parser_proxy: str | None = Field(
+        default=None,
+        description=(
+            "Proxy for marketplace requests only, independent of TELEGRAM_PROXY. Needed when "
+            "the server IP is blocked by the marketplace WAF (datacenter ranges usually are)."
+        ),
+    )
 
     # Anti-flood
     throttle_rate: float = Field(default=1.5, ge=0)
