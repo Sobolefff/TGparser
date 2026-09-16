@@ -81,7 +81,40 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
-Compose поднимает два сервиса: `redis` (с healthcheck и `allkeys-lru`) и `bot`.
+Compose поднимает два сервиса: `redis` (healthcheck, `allkeys-lru`, кэш без записи на
+диск) и `bot` (собирается из `Dockerfile`, работает от непривилегированного пользователя).
+У обоих `restart: unless-stopped` и ротация логов, так что после перезагрузки сервера они
+поднимаются сами, а логи не забивают диск.
+
+Порты наружу не публикуются: бот работает через long polling и входящих соединений не
+принимает.
+
+## Деплой на VPS
+
+Пошаговая инструкция для Ubuntu-сервера — от первого входа по SSH до автозапуска и
+разбора типовых поломок: **[DEPLOY.md](DEPLOY.md)**.
+
+Коротко, если сервер уже настроен и Docker установлен:
+
+```bash
+git clone <репозиторий> ~/TGparser && cd ~/TGparser
+cp .env.example .env && nano .env    # вписать BOT_TOKEN
+chmod 600 .env
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+Обновление до новой версии:
+
+```bash
+cd ~/TGparser && git pull
+docker compose up -d --build && docker image prune -f
+```
+
+> **Локация сервера важна.** Маркетплейсы фильтруют трафик по IP: с зарубежных
+> дата-центров их API часто отвечают `403`, и бот на каждую ссылку будет отвечать
+> «Маркетплейс закрыл доступ к карточке». Как проверить это одной командой до деплоя —
+> в [DEPLOY.md](DEPLOY.md#шаг-8-проверка-доступа-к-маркетплейсам).
 
 ## Конфигурация
 

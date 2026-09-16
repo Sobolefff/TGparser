@@ -1,9 +1,15 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   redis:
     image: redis:7-alpine
-    container_name: tgparser-redis
     restart: unless-stopped
     command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -12,12 +18,12 @@ services:
 
   bot:
     build: .
-    container_name: tgparser-bot
     restart: unless-stopped
     env_file: .env
     environment:
       # Overrides .env so the bot always talks to the compose-managed Redis.
       REDIS_URL: redis://redis:6379/0
+    logging: *default-logging
     depends_on:
       redis:
         condition: service_healthy
