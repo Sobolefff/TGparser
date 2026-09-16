@@ -26,6 +26,14 @@ class Settings(BaseSettings):
 
     # Telegram
     bot_token: SecretStr
+    telegram_proxy: str | None = Field(
+        default=None,
+        description=(
+            "Proxy for Telegram API calls only, e.g. socks5://user:pass@host:1080 or "
+            "http://host:3128. Marketplace requests always go out directly, so the bot can "
+            "keep a Russian IP for parsing while reaching Telegram through a proxy."
+        ),
+    )
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

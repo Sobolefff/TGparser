@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -11,14 +13,29 @@ from redis.asyncio import Redis
 from bot.handlers import build_router
 from bot.handlers.common import BOT_COMMANDS
 from bot.middlewares.throttling import ThrottlingMiddleware
+from bot.session import ResilientAiohttpSession
 from config import Settings
 from services.product_service import ProductService
 
+logger = logging.getLogger(__name__)
+
 
 def create_bot(settings: Settings) -> Bot:
-    """Build the Bot with HTML parse mode and link previews disabled by default."""
+    """Build the Bot with HTML parse mode and link previews disabled by default.
+
+    When ``TELEGRAM_PROXY`` is set, only Telegram traffic goes through it — the marketplace
+    parsers keep their own direct clients, which matters when the server needs a local IP
+    for parsing but cannot reach ``api.telegram.org`` directly.
+    """
+    session = (
+        ResilientAiohttpSession(proxy=settings.telegram_proxy) if settings.telegram_proxy else None
+    )
+    if session is not None:
+        logger.info("Telegram API calls are routed through a proxy")
+
     return Bot(
         token=settings.bot_token.get_secret_value(),
+        session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML, link_preview_is_disabled=True),
     )
 

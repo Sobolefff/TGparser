@@ -8,6 +8,7 @@ import logging
 import sys
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramNetworkError
 
 from bot import BOT_COMMANDS, create_bot, create_dispatcher
 from config import Settings, get_settings
@@ -30,12 +31,30 @@ def setup_logging(settings: Settings) -> None:
 
 
 async def on_startup(bot: Bot, cache: ProductCache) -> None:
-    await bot.set_my_commands(BOT_COMMANDS)
-    me = await bot.get_me()
+    """Report the state of the dependencies.
+
+    Nothing here is allowed to abort the start: if Telegram is unreachable right now,
+    long polling keeps retrying with a backoff and the bot recovers on its own once the
+    network is back. Crashing instead would only produce a container restart loop.
+    """
     if await cache.ping():
         logger.info("redis is reachable, cards are cached for %s seconds", cache.ttl)
     else:
         logger.warning("redis is unreachable — running without cache")
+
+    try:
+        me = await bot.get_me()
+        await bot.set_my_commands(BOT_COMMANDS)
+        await bot.delete_webhook(drop_pending_updates=True)
+    except TelegramNetworkError as exc:
+        logger.error(
+            "Telegram API is unreachable (%s). Polling will keep retrying. "
+            "Check outbound access to api.telegram.org from this host, or set "
+            "TELEGRAM_PROXY in .env.",
+            exc,
+        )
+        return
+
     logger.info("bot @%s is up and polling", me.username)
 
 
@@ -55,7 +74,6 @@ async def run() -> None:
 
     try:
         await on_startup(bot, cache)
-        await bot.delete_webhook(drop_pending_updates=True)
         await dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types())
     finally:
         logger.info("shutting down")
